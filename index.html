@@ -2795,7 +2795,9 @@ const LOOPIE_IDLE_LINES = [
 ];
 
 let loopieHideTimer = null;
-function loopieSay(text) {
+let loopieHasSpoken = false;
+function loopieSay(text, opts) {
+  const { chime = "pop" } = opts || {};
   const bubble = $("#loopie-bubble");
   const textEl = $("#loopie-text");
   const avatar = $("#loopie-avatar");
@@ -2812,6 +2814,11 @@ function loopieSay(text) {
   }
   clearTimeout(loopieHideTimer);
   loopieHideTimer = setTimeout(() => bubble.classList.add("is-hidden"), 6000);
+  // Skip the default pop on Loopie's very first line — the welcome jingle
+  // (played separately when she first appears) already covers that moment.
+  if (chime === "celebrate") loopiePlayCelebrate();
+  else if (chime === "pop" && loopieHasSpoken) loopiePlaySoftPop();
+  loopieHasSpoken = true;
 }
 
 function updateLoopieForPage(page) {
@@ -2827,6 +2834,84 @@ function updateLoopieForPage(page) {
     const avgPct = (82 + 67) / 2;
     loopieSay(avgPct >= 80 ? "You're basically a planning wizard this week!" : avgPct >= 60 ? "Solid week — your follow-through is really improving." : "Every week is data — let's use this to plan better next time.");
   }
+}
+
+/* ---------------- Loopie sounds ---------------- */
+/* A few tiny, self-contained sounds for Loopie — synthesized with the
+   Web Audio API, so there's no sound file to host or load. Browsers
+   block audio before any user gesture: the welcome jingle waits for the
+   visitor's first tap/click/keypress if it can't play right away, while
+   the everyday pop/celebrate sounds are triggered from inside real click
+   handlers (already a user gesture) so they can just resume-and-play. */
+let loopieAudioCtx = null;
+function loopieGetAudioCtx() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!loopieAudioCtx) loopieAudioCtx = new Ctx();
+  return loopieAudioCtx;
+}
+
+function loopieRunWhenReady(fn) {
+  const ctx = loopieGetAudioCtx();
+  if (!ctx) return;
+  if (ctx.state === "suspended") ctx.resume().then(fn).catch(() => {});
+  else fn();
+}
+
+function loopiePlayNotes(notes) {
+  const ctx = loopieGetAudioCtx();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  notes.forEach(({ freq, start, dur, gain: g, type }) => {
+    const osc = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    osc.type = type || "triangle";
+    osc.frequency.setValueAtTime(freq, now + start);
+    gainNode.gain.setValueAtTime(0, now + start);
+    gainNode.gain.linearRampToValueAtTime(g, now + start + 0.015);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+    osc.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    osc.start(now + start);
+    osc.stop(now + start + dur + 0.03);
+  });
+}
+
+// The "hello" jingle, played once when Loopie first shows up.
+function loopiePlayWelcomeChime() {
+  const ctx = loopieGetAudioCtx();
+  if (!ctx) return;
+  const play = () => loopiePlayNotes([
+    { freq: 659.25, start: 0.00, dur: 0.14, gain: 0.16 }, // E5
+    { freq: 987.77, start: 0.10, dur: 0.14, gain: 0.16 }, // B5
+    { freq: 1318.5, start: 0.21, dur: 0.30, gain: 0.14 }, // E6
+  ]);
+  if (ctx.state === "suspended") {
+    const unlock = () => {
+      ctx.resume().then(play).catch(() => {});
+      ["pointerdown", "keydown", "touchstart"].forEach((evt) => document.removeEventListener(evt, unlock));
+    };
+    ["pointerdown", "keydown", "touchstart"].forEach((evt) => document.addEventListener(evt, unlock, { once: true }));
+  } else {
+    play();
+  }
+}
+
+// A very soft, quick blip for everyday bubble pops (idle lines, page nav).
+function loopiePlaySoftPop() {
+  loopieRunWhenReady(() => loopiePlayNotes([
+    { freq: 880, start: 0, dur: 0.09, gain: 0.07, type: "sine" },
+  ]));
+}
+
+// A brighter little flourish for wins — task completed, session finished.
+function loopiePlayCelebrate() {
+  loopieRunWhenReady(() => loopiePlayNotes([
+    { freq: 587.33, start: 0.00, dur: 0.12, gain: 0.15 }, // D5
+    { freq: 739.99, start: 0.09, dur: 0.12, gain: 0.15 }, // F#5
+    { freq: 987.77, start: 0.18, dur: 0.16, gain: 0.15 }, // B5
+    { freq: 1318.5, start: 0.30, dur: 0.26, gain: 0.13 }, // E6
+  ]));
 }
 
 function initLoopie() {
@@ -2849,6 +2934,7 @@ function initLoopie() {
   }
   const current = document.querySelector(".spa-page.is-active");
   updateLoopieForPage(current ? current.id.replace("page-", "") : "home");
+  loopiePlayWelcomeChime();
   // Loopie stays pinned in her corner (see .loopie-widget) instead of wandering the
   // screen — a wandering mascot occasionally drifted over content or the edge of the
   // viewport, which made her speech bubble hard to read. initLoopieWanderPause() and
@@ -3754,7 +3840,7 @@ function renderToday(a) {
         const already = row.classList.contains("is-complete");
         row.classList.toggle("is-complete");
         btn.textContent = already ? "Mark complete" : "Completed ✓";
-        if (!already) loopieSay("One more thing off your plate — nice.");
+        if (!already) loopieSay("One more thing off your plate — nice.", { chime: "celebrate" });
       });
     });
 
@@ -3823,7 +3909,7 @@ function completeFocusSession(a) {
   doneEl.innerHTML = `${DOODLE_SVG.confettiBurst.replace('viewBox="0 0 60 40"', 'viewBox="0 0 60 40" width="52" height="34" style="display:block;margin:0 auto 8px;"')}Nice — ${CHUNK_LABEL[a.chunk] || "that time"} moved out of ${DAY_FULL[pDay]}.`;
   doneEl.classList.add("is-shown");
   renderToday(a);
-  loopieSay("You did it! That's real progress. 🎉");
+  loopieSay("You did it! That's real progress. 🎉", { chime: "celebrate" });
   setTimeout(() => { $("#focus-overlay").classList.remove("is-open"); }, 1600);
 }
 
@@ -3926,7 +4012,7 @@ function moveItemEarlier(a) {
     toast.classList.add("is-open");
     setTimeout(() => toast.classList.remove("is-open"), 3500);
   }
-  loopieSay("Smart move — future-you says thanks.");
+  loopieSay("Smart move — future-you says thanks.", { chime: "celebrate" });
 }
 
 const TT_TYPE_COLORS = { Class:"var(--plum)", Study:"var(--coral)", Club:"var(--sun)", Commute:"var(--ink-soft)", Personal:"var(--leaf)" };
